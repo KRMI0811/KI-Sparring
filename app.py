@@ -5,6 +5,9 @@ Sprachmodell: Apertus über die Public AI Inference Utility (Free Plan)
 """
 
 import io
+from datetime import datetime
+from pathlib import Path
+from zoneinfo import ZoneInfo
 
 import streamlit as st
 from openai import OpenAI
@@ -52,7 +55,58 @@ WELCOME = (
     "Womit möchtest du anfangen?"
 )
 
-st.set_page_config(page_title="KI-Sparringspartner Entrepreneurship", page_icon="💡")
+APP_NAME = st.secrets.get("APP_NAME", "KI-Sparringspartner Entrepreneurship")
+st.set_page_config(page_title=APP_NAME, page_icon="💡")
+
+# ---------------------------------------------------------------------------
+# Logo (optional): Datei "logo.png" neben app.py auf GitHub hochladen
+# ---------------------------------------------------------------------------
+LOGO = Path(__file__).parent / "logo.png"
+if LOGO.exists():
+    st.logo(str(LOGO), size="large")
+
+# ---------------------------------------------------------------------------
+# Sicherheitshinweise
+# ---------------------------------------------------------------------------
+HINWEISE = """
+- Gib keine persönlichen Daten ein (Namen, Adressen, Telefonnummern, Gesundheitsdaten).
+- Lade keine vertraulichen Unterlagen hoch, etwa Verträge, Finanzdaten Dritter oder \
+Geschäftsgeheimnisse von Partnerfirmen.
+- Die KI kann sich irren und Fakten erfinden. Prüfe Zahlen, Marktdaten und Quellen selbst.
+- Die Antworten sind Denkanstösse, keine Bewertung und keine Rechts-, Steuer- oder Finanzberatung.
+- Deine Eingaben werden zur Beantwortung an den Dienst Public AI übermittelt. \
+Die Dozierenden sehen deine Gespräche nicht.
+- Die Regeln der Hochschule zu KI in Leistungsnachweisen gelten auch hier.
+"""
+
+# ---------------------------------------------------------------------------
+# Zugang und Öffnungszeiten (werden in den Streamlit-Secrets eingestellt)
+# ---------------------------------------------------------------------------
+TAGE = ["Mo", "Di", "Mi", "Do", "Fr", "Sa", "So"]
+
+
+def zugang_offen() -> tuple[bool, str]:
+    if not st.secrets.get("ACCESS_OPEN", True):
+        return False, "Der Zugang ist zurzeit geschlossen."
+    tage = [t.strip() for t in st.secrets.get("OPEN_DAYS", "Mo,Di,Mi,Do,Fr,Sa,So").split(",")]
+    von = st.secrets.get("OPEN_FROM", "00:00")
+    bis = st.secrets.get("OPEN_UNTIL", "23:59")
+    jetzt = datetime.now(ZoneInfo("Europe/Zurich"))
+    heute = TAGE[jetzt.weekday()]
+    uhrzeit = jetzt.strftime("%H:%M")
+    if heute in tage and von <= uhrzeit <= bis:
+        return True, ""
+    return False, (
+        f"Geöffnet ist {', '.join(tage)} von {von} bis {bis} Uhr. "
+        "Schau gerne zu diesen Zeiten wieder vorbei."
+    )
+
+
+offen, meldung = zugang_offen()
+if not offen:
+    st.title(APP_NAME)
+    st.info(meldung)
+    st.stop()
 
 
 # ---------------------------------------------------------------------------
@@ -61,8 +115,10 @@ st.set_page_config(page_title="KI-Sparringspartner Entrepreneurship", page_icon=
 def check_password() -> bool:
     if st.session_state.get("auth_ok"):
         return True
-    st.title("KI-Sparringspartner")
+    st.title(APP_NAME)
     st.write("Bitte gib das Kurspasswort ein, das du von deiner Dozentin oder deinem Dozenten erhalten hast.")
+    with st.expander("Wichtige Hinweise vor der Nutzung", expanded=True):
+        st.markdown(HINWEISE)
     pw = st.text_input("Kurspasswort", type="password")
     if st.button("Anmelden"):
         if pw == st.secrets.get("APP_PASSWORD", ""):
@@ -183,15 +239,13 @@ with st.sidebar:
         for key in ("messages", "canvas_text", "canvas_name", "pending"):
             st.session_state.pop(key, None)
         st.rerun()
-    st.caption(
-        "Hinweis: Gib keine vertraulichen oder persönlichen Daten ein. "
-        "Die KI kann sich irren. Prüfe Aussagen und Zahlen selbst."
-    )
+    with st.expander("Hinweise zur Nutzung"):
+        st.markdown(HINWEISE)
 
 # ---------------------------------------------------------------------------
 # Chat
 # ---------------------------------------------------------------------------
-st.title("KI-Sparringspartner Entrepreneurship")
+st.title(APP_NAME)
 
 for m in st.session_state.messages:
     with st.chat_message(m["role"]):
