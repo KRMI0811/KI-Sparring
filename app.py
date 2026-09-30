@@ -159,6 +159,8 @@ def get_client() -> OpenAI:
     return OpenAI(
         api_key=st.secrets["PUBLICAI_API_KEY"],
         base_url=API_BASE,
+        timeout=60,
+        max_retries=1,
         default_headers={"User-Agent": "Entrepreneurship-Sparring/1.0"},
     )
 
@@ -233,6 +235,7 @@ def respond(user_text: str):
             answer = st.write_stream(ask_model())
             verbrauch_erfassen(build_messages(), answer)
         except Exception as e:  # Limits, Netzwerk, Schlüssel
+            print("FEHLER bei Anfrage an Public AI:", repr(e), flush=True)
             msg = str(e).lower()
             if any(w in msg for w in ("402", "credit", "balance", "insufficient", "quota", "payment")):
                 answer = "Das Kontingent für dieses Semester ist aufgebraucht. Der Sparringspartner steht deshalb zurzeit nicht zur Verfügung."
@@ -243,6 +246,8 @@ def respond(user_text: str):
             else:
                 answer = "Die Antwort konnte nicht erstellt werden. Versuche es in einem Moment noch einmal."
             st.warning(answer)
+            with st.expander("Technische Details"):
+                st.code(repr(e)[:1500])
     st.session_state.messages.append({"role": "assistant", "content": answer})
 
 
