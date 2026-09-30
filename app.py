@@ -22,6 +22,12 @@ MODEL = st.secrets.get("MODEL", "swiss-ai/apertus-v1.5-8b")
 MAX_CANVAS_CHARS = 15000      # Canvas-Text wird bei Bedarf gekürzt
 MAX_HISTORY = 16              # nur die letzten Nachrichten werden mitgeschickt
 
+# Kontingent-Anzeige (Werte in US-Dollar, in den Secrets einstellbar)
+BUDGET_START = float(st.secrets.get("BUDGET_START", 2.00))
+BUDGET_REMAINING = float(st.secrets.get("BUDGET_REMAINING", BUDGET_START))
+PRICE_IN = float(st.secrets.get("PRICE_IN", 0.10))    # pro 1 Mio. Tokens
+PRICE_OUT = float(st.secrets.get("PRICE_OUT", 0.20))  # pro 1 Mio. Tokens
+
 SYSTEM_PROMPT = """Du bist ein erfahrener, kritischer und wohlwollender Sparringspartner \
 für Studierende im Kurs Entrepreneurship an einer Schweizer Hochschule. \
 Du schreibst auf Deutsch in Schweizer Rechtschreibung (ss statt ß).
@@ -85,21 +91,32 @@ Die Dozierenden sehen deine Gespräche nicht.
 TAGE = ["Mo", "Di", "Mi", "Do", "Fr", "Sa", "So"]
 
 
+OPEN_DAYS = [t.strip() for t in st.secrets.get("OPEN_DAYS", "Mo,Di,Mi,Do,Fr,Sa,So").split(",")]
+OPEN_FROM = st.secrets.get("OPEN_FROM", "00:00")
+OPEN_UNTIL = st.secrets.get("OPEN_UNTIL", "23:59")
+END_DATE = st.secrets.get("END_DATE", "")  # Format TT.MM.JJJJ, leer = unbegrenzt
+
+
+def zeiten_text() -> str:
+    text = f"Geöffnet {', '.join(OPEN_DAYS)} von {OPEN_FROM} bis {OPEN_UNTIL} Uhr."
+    if END_DATE:
+        text += f" Verfügbar bis {END_DATE}."
+    return text
+
+
 def zugang_offen() -> tuple[bool, str]:
     if not st.secrets.get("ACCESS_OPEN", True):
         return False, "Der Zugang ist zurzeit geschlossen."
-    tage = [t.strip() for t in st.secrets.get("OPEN_DAYS", "Mo,Di,Mi,Do,Fr,Sa,So").split(",")]
-    von = st.secrets.get("OPEN_FROM", "00:00")
-    bis = st.secrets.get("OPEN_UNTIL", "23:59")
     jetzt = datetime.now(ZoneInfo("Europe/Zurich"))
+    if END_DATE:
+        ende = datetime.strptime(END_DATE, "%d.%m.%Y").date()
+        if jetzt.date() > ende:
+            return False, f"Das Angebot war bis {END_DATE} verfügbar und ist nun beendet."
     heute = TAGE[jetzt.weekday()]
     uhrzeit = jetzt.strftime("%H:%M")
-    if heute in tage and von <= uhrzeit <= bis:
+    if heute in OPEN_DAYS and OPEN_FROM <= uhrzeit <= OPEN_UNTIL:
         return True, ""
-    return False, (
-        f"Geöffnet ist {', '.join(tage)} von {von} bis {bis} Uhr. "
-        "Schau gerne zu diesen Zeiten wieder vorbei."
-    )
+    return False, zeiten_text() + " Schau gerne zu diesen Zeiten wieder vorbei."
 
 
 offen, meldung = zugang_offen()
@@ -117,6 +134,7 @@ def check_password() -> bool:
         return True
     st.title(APP_NAME)
     st.write("Bitte gib das Kurspasswort ein, das du von deiner Dozentin oder deinem Dozenten erhalten hast.")
+    st.caption("🕒 " + zeiten_text())
     with st.expander("Wichtige Hinweise vor der Nutzung", expanded=True):
         st.markdown(HINWEISE)
     pw = st.text_input("Kurspasswort", type="password")
@@ -161,6 +179,26 @@ def extract_text(uploaded) -> str:
     return data.decode("utf-8", errors="ignore")
 
 
+@st.cache_resource
+def verbrauch() -> dict:
+    """Geschätzter Verbrauch seit dem letzten Start der App (für alle Nutzenden gemeinsam)."""
+    return {"dollar": 0.0, "stand": BUDGET_REMAINING}
+
+
+def verbrauch_erfassen(messages: list, antwort: str):
+    v = verbrauch()
+    if v["stand"] != BUDGET_REMAINING:  # Wert in den Secrets wurde aktualisiert
+        v["dollar"], v["stand"] = 0.0, BUDGET_REMAINING
+    tokens_in = sum(len(m["content"]) for m in messages) / 4
+    tokens_out = len(antwort) / 4
+    v["dollar"] += tokens_in * PRICE_IN / 1e6 + tokens_out * PRICE_OUT / 1e6
+
+
+def kontingent_anteil() -> float:
+    rest = BUDGET_REMAINING - verbrauch()["dollar"]
+    return max(0.0, min(1.0, rest / BUDGET_START)) if BUDGET_START > 0 else 0.0
+
+
 def build_messages() -> list:
     system = SYSTEM_PROMPT
     canvas = st.session_state.get("canvas_text")
@@ -193,9 +231,12 @@ def respond(user_text: str):
     with st.chat_message("assistant"):
         try:
             answer = st.write_stream(ask_model())
+            verbrauch_erfassen(build_messages(), answer)
         except Exception as e:  # Limits, Netzwerk, Schlüssel
             msg = str(e).lower()
-            if "429" in msg or "rate" in msg:
+            if any(w in msg for w in ("402", "credit", "balance", "insufficient", "quota", "payment")):
+                answer = "Das Kontingent für dieses Semester ist aufgebraucht. Der Sparringspartner steht deshalb zurzeit nicht zur Verfügung."
+            elif "429" in msg or "rate" in msg:
                 answer = "Gerade sind sehr viele Anfragen gleichzeitig unterwegs. Warte eine Minute und versuche es erneut."
             elif "401" in msg or "auth" in msg:
                 answer = "Der Zugang zum Sprachmodell funktioniert nicht. Bitte informiere deine Dozentin oder deinen Dozenten."
@@ -239,6 +280,9 @@ with st.sidebar:
         for key in ("messages", "canvas_text", "canvas_name", "pending"):
             st.session_state.pop(key, None)
         st.rerun()
+    anteil = kontingent_anteil()
+    st.progress(anteil, text=f"Kontingent: ca. {round(anteil * 100)} % verfügbar")
+    st.caption("🕒 " + zeiten_text())
     with st.expander("Hinweise zur Nutzung"):
         st.markdown(HINWEISE)
 
