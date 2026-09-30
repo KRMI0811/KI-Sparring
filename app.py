@@ -19,13 +19,16 @@ from docx import Document
 # ---------------------------------------------------------------------------
 # Einstellungen
 # ---------------------------------------------------------------------------
-API_BASE = "https://api.publicai.co/v1"
+API_BASE = st.secrets.get("API_BASE", "https://api.publicai.co/v1").rstrip("/")
+API_KEY = str(st.secrets.get("API_KEY", st.secrets.get("PUBLICAI_API_KEY", ""))).strip()
+PROVIDER = st.secrets.get("PROVIDER_NAME", "Public AI")
+REASONING = st.secrets.get("REASONING_EFFORT", "")  # z. B. "low" für gpt-oss bei Groq
 MODEL = st.secrets.get("MODEL", "swiss-ai/apertus-v1.5-8b")
 MAX_CANVAS_CHARS = 15000      # Canvas-Text wird bei Bedarf gekürzt
 MAX_HISTORY = 16              # nur die letzten Nachrichten werden mitgeschickt
 
 # Kontingent-Anzeige (Werte in US-Dollar, in den Secrets einstellbar)
-BUDGET_START = float(st.secrets.get("BUDGET_START", 2.00))
+BUDGET_START = float(st.secrets.get("BUDGET_START", 2.00 if "publicai" in st.secrets.get("API_BASE", "publicai") else 0))
 BUDGET_REMAINING = float(st.secrets.get("BUDGET_REMAINING", BUDGET_START))
 PRICE_IN = float(st.secrets.get("PRICE_IN", 0.10))    # pro 1 Mio. Tokens
 PRICE_OUT = float(st.secrets.get("PRICE_OUT", 0.20))  # pro 1 Mio. Tokens
@@ -76,13 +79,13 @@ if LOGO.exists():
 # ---------------------------------------------------------------------------
 # Sicherheitshinweise
 # ---------------------------------------------------------------------------
-HINWEISE = """
+HINWEISE = f"""
 - Gib keine persönlichen Daten ein (Namen, Adressen, Telefonnummern, Gesundheitsdaten).
 - Lade keine vertraulichen Unterlagen hoch, etwa Verträge, Finanzdaten Dritter oder \
 Geschäftsgeheimnisse von Partnerfirmen.
 - Die KI kann sich irren und Fakten erfinden. Prüfe Zahlen, Marktdaten und Quellen selbst.
 - Die Antworten sind Denkanstösse, keine Bewertung und keine Rechts-, Steuer- oder Finanzberatung.
-- Deine Eingaben werden zur Beantwortung an den Dienst Public AI übermittelt. \
+- Deine Eingaben werden zur Beantwortung an den Dienst {PROVIDER} übermittelt. \
 Die Dozierenden sehen deine Gespräche nicht.
 - Die Regeln der Hochschule zu KI in Leistungsnachweisen gelten auch hier.
 """
@@ -208,18 +211,26 @@ class ModellFehler(Exception):
     pass
 
 
+def nutzlast(messages: list, max_tokens: int) -> dict:
+    daten = {"model": MODEL, "messages": messages, "temperature": 0.6,
+             "max_tokens": max_tokens, "stream": False}
+    if REASONING:
+        daten["reasoning_effort"] = REASONING
+        daten["max_tokens"] = max_tokens + 1500  # Platz für internes Nachdenken
+    return daten
+
+
 def anfrage(messages: list, max_tokens: int = 900, timeout: float | None = None) -> tuple[str, str]:
     """Direkte HTTP-Anfrage an Public AI. Gibt (Antwort, Rohdaten) zurück."""
     try:
         r = requests.post(
             f"{API_BASE}/chat/completions",
             headers={
-                "Authorization": f"Bearer {st.secrets['PUBLICAI_API_KEY'].strip()}",
+                "Authorization": f"Bearer {API_KEY}",
                 "Content-Type": "application/json",
                 "User-Agent": "EntrepreneurshipSparring/1.0",
             },
-            json={"model": MODEL, "messages": messages,
-                  "temperature": 0.6, "max_tokens": max_tokens, "stream": False},
+            json=nutzlast(messages, max_tokens),
             timeout=(15, timeout or float(st.secrets.get("TIMEOUT", 120))),
         )
     except requests.exceptions.Timeout:
@@ -321,8 +332,9 @@ with st.sidebar:
                 except Exception as e:
                     st.error(f"Fehler nach {time.time() - t0:.1f} s")
                     st.code(str(e)[:1500])
-    anteil = kontingent_anteil()
-    st.progress(anteil, text=f"Kontingent: ca. {round(anteil * 100)} % verfügbar")
+    if BUDGET_START > 0:
+      anteil = kontingent_anteil()
+      st.progress(anteil, text=f"Kontingent: ca. {round(anteil * 100)} % verfügbar")
     st.caption("🕒 " + zeiten_text())
     with st.expander("Hinweise zur Nutzung"):
         st.markdown(HINWEISE)
