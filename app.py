@@ -10,7 +10,9 @@ from pathlib import Path
 from zoneinfo import ZoneInfo
 
 import streamlit as st
-from openai import OpenAI
+import time
+
+import requests
 from pypdf import PdfReader
 from docx import Document
 
@@ -154,17 +156,6 @@ if not check_password():
 # ---------------------------------------------------------------------------
 # Hilfsfunktionen
 # ---------------------------------------------------------------------------
-@st.cache_resource
-def get_client() -> OpenAI:
-    return OpenAI(
-        api_key=st.secrets["PUBLICAI_API_KEY"],
-        base_url=API_BASE,
-        timeout=60,
-        max_retries=1,
-        default_headers={"User-Agent": "Entrepreneurship-Sparring/1.0"},
-    )
-
-
 def extract_text(uploaded) -> str:
     data = uploaded.getvalue()
     name = uploaded.name.lower()
@@ -213,17 +204,39 @@ def build_messages() -> list:
     return [{"role": "system", "content": system}] + history
 
 
-def ask_model():
-    stream = get_client().chat.completions.create(
-        model=MODEL,
-        messages=build_messages(),
-        temperature=0.6,
-        max_tokens=900,
-        stream=True,
-    )
-    for chunk in stream:
-        if chunk.choices and chunk.choices[0].delta.content:
-            yield chunk.choices[0].delta.content
+class ModellFehler(Exception):
+    pass
+
+
+def anfrage(messages: list, max_tokens: int = 900, timeout: float | None = None) -> tuple[str, str]:
+    """Direkte HTTP-Anfrage an Public AI. Gibt (Antwort, Rohdaten) zurück."""
+    try:
+        r = requests.post(
+            f"{API_BASE}/chat/completions",
+            headers={
+                "Authorization": f"Bearer {st.secrets['PUBLICAI_API_KEY'].strip()}",
+                "Content-Type": "application/json",
+                "User-Agent": "EntrepreneurshipSparring/1.0",
+            },
+            json={"model": MODEL, "messages": messages,
+                  "temperature": 0.6, "max_tokens": max_tokens, "stream": False},
+            timeout=(15, timeout or float(st.secrets.get("TIMEOUT", 120))),
+        )
+    except requests.exceptions.Timeout:
+        raise ModellFehler("timeout: Request timed out.")
+    roh = f"HTTP {r.status_code}: {r.text[:1500]}"
+    if r.status_code != 200:
+        raise ModellFehler(roh)
+    data = r.json()
+    text = ""
+    if data.get("choices"):
+        msg = data["choices"][0].get("message", {})
+        text = (msg.get("content") or msg.get("reasoning_content") or msg.get("reasoning") or "").strip()
+    return text, roh
+
+
+def ask_model() -> tuple[str, str]:
+    return anfrage(build_messages())
 
 
 def respond(user_text: str):
@@ -232,12 +245,24 @@ def respond(user_text: str):
         st.markdown(user_text)
     with st.chat_message("assistant"):
         try:
-            answer = st.write_stream(ask_model())
-            verbrauch_erfassen(build_messages(), answer)
+            with st.spinner("Denke nach …"):
+                answer, roh = ask_model()
+            print("Antwort erhalten, Zeichen:", len(answer), flush=True)
+            if answer:
+                st.markdown(answer)
+                verbrauch_erfassen(build_messages(), answer)
+            else:
+                print("LEERE ANTWORT:", roh, flush=True)
+                answer = "Es kam keine Antwort vom Sprachmodell zurück. Bitte informiere deine Dozentin oder deinen Dozenten."
+                st.warning(answer)
+                with st.expander("Technische Details"):
+                    st.code(roh)
         except Exception as e:  # Limits, Netzwerk, Schlüssel
             print("FEHLER bei Anfrage an Public AI:", repr(e), flush=True)
             msg = str(e).lower()
-            if any(w in msg for w in ("402", "credit", "balance", "insufficient", "quota", "payment")):
+            if "timeout" in msg or "timed out" in msg:
+                answer = "Das Sprachmodell ist gerade überlastet und hat nicht rechtzeitig geantwortet. Versuche es in ein paar Minuten erneut."
+            elif any(w in msg for w in ("402", "credit", "balance", "insufficient", "quota", "payment")):
                 answer = "Das Kontingent für dieses Semester ist aufgebraucht. Der Sparringspartner steht deshalb zurzeit nicht zur Verfügung."
             elif "429" in msg or "rate" in msg:
                 answer = "Gerade sind sehr viele Anfragen gleichzeitig unterwegs. Warte eine Minute und versuche es erneut."
@@ -285,6 +310,17 @@ with st.sidebar:
         for key in ("messages", "canvas_text", "canvas_name", "pending"):
             st.session_state.pop(key, None)
         st.rerun()
+    if st.query_params.get("test") == "1":
+        with st.expander("Verbindungstest (nur für Dozierende)", expanded=True):
+            if st.button("Verbindung testen"):
+                t0 = time.time()
+                try:
+                    txt, roh = anfrage([{"role": "user", "content": "Antworte nur mit OK."}],
+                                       max_tokens=10, timeout=60)
+                    st.success(f"Antwort nach {time.time() - t0:.1f} s: {txt}")
+                except Exception as e:
+                    st.error(f"Fehler nach {time.time() - t0:.1f} s")
+                    st.code(str(e)[:1500])
     anteil = kontingent_anteil()
     st.progress(anteil, text=f"Kontingent: ca. {round(anteil * 100)} % verfügbar")
     st.caption("🕒 " + zeiten_text())
